@@ -1006,6 +1006,7 @@ async def test_zg_ir01_low_byte_terminal_retries_incomplete_learn(
 
 async def test_zg_ir01_validates_capture_protocol(
     zigpy_device_from_v2_quirk,
+    caplog,
 ):
     """Capture uses the proven shared flow, including a truncated terminal seq."""
     device = zigpy_device_from_v2_quirk(
@@ -1059,6 +1060,8 @@ async def test_zg_ir01_validates_capture_protocol(
         hdr, args = transmit.deserialize(final_part)
         transmit.handle_message(hdr, args)
         await wait_for_zigpy_tasks()
+        final_part_header = hdr
+        final_part_args = args
 
         # The observed firmware truncates a 16-bit sequence to its low byte.
         complete = bytes.fromhex("096905") + bytes((sequence & 0xFF, 0, 0, 0))
@@ -1067,6 +1070,32 @@ async def test_zg_ir01_validates_capture_protocol(
         await wait_for_zigpy_tasks()
 
         request_count = request_mock.call_count
+        caplog.clear()
+        transmit.handle_message(final_part_header, final_part_args)
+        await wait_for_zigpy_tasks()
+        assert request_mock.call_count == request_count
+        assert default_response_mock.call_args.kwargs["status"] == (
+            foundation.Status.SUCCESS
+        )
+        assert "Rejecting ZG-IR01 learn transfer part" not in caplog.text
+
+        altered_remaining = bytes((remaining[0] ^ 0x01,)) + remaining[1:]
+        altered_final_part = (
+            bytes.fromhex("09690300")
+            + sequence.to_bytes(2, "little")
+            + len(first_part).to_bytes(4, "little")
+            + bytes((len(altered_remaining),))
+            + altered_remaining
+            + bytes((sum(altered_remaining) % 0x100,))
+        )
+        altered_header, altered_args = transmit.deserialize(altered_final_part)
+        transmit.handle_message(altered_header, altered_args)
+        await wait_for_zigpy_tasks()
+        assert default_response_mock.call_args.kwargs["status"] == (
+            foundation.Status.FAILURE
+        )
+        assert "no learn transfer is active" in caplog.text
+
         transmit.handle_message(hdr, args)
         await wait_for_zigpy_tasks()
         assert request_mock.call_count == request_count

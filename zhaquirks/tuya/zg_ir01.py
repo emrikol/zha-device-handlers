@@ -190,6 +190,7 @@ class _LearnTransfer:
         self.expected_length = 0
         self.data = bytearray()
         self.received = bytearray()
+        self.parts: dict[tuple[int, int], tuple[bytes, int]] = {}
 
     @property
     def expected_position(self) -> int:
@@ -238,6 +239,7 @@ class _LearnTransfer:
 
         self.data[position : position + len(part)] = part
         self.received[position : position + len(part)] = b"\x01" * len(part)
+        self.parts[(sequence, position)] = (part, checksum)
         return None
 
     def matches_completion_sequence(self, sequence: int) -> bool:
@@ -481,6 +483,7 @@ class ZGIR01Transmit(ZosungIRTransmit):
         self._outgoing_parts_in_flight: set[tuple[int, int]] = set()
         self._learn_transfer = _LearnTransfer()
         self._last_learn_completion_sequences: set[int] = set()
+        self._last_completed_learn_parts: dict[tuple[int, int], tuple[bytes, int]] = {}
 
     async def command(self, command_id: Any, *args: Any, **kwargs: Any) -> Any:
         """Suppress default responses for coordinator-to-device frames."""
@@ -552,6 +555,7 @@ class ZGIR01Transmit(ZosungIRTransmit):
             return
 
         self._last_learn_completion_sequences.clear()
+        self._last_completed_learn_parts.clear()
         self._send_default_response(hdr)
         self.create_catching_task(
             super().command(
@@ -573,12 +577,24 @@ class ZGIR01Transmit(ZosungIRTransmit):
     def _append_learn_transfer(self, hdr: foundation.ZCLHeader, args: Any) -> None:
         """Validate one learned-code part and advance through the packet."""
         sequence = int(args.seq)
+        position = int(args.position)
         part = bytes(args.msgpart)
+        checksum = int(args.msgpartcrc)
+        if (
+            self._learn_transfer.sequence is None
+            and self._last_completed_learn_parts.get((sequence, position))
+            == (part, checksum)
+        ):
+            # This firmware can deliver a duplicate of the final data part after
+            # its terminal frame. Acknowledge only an exact part from the most
+            # recently completed transfer; unrelated orphan parts still fail.
+            self._send_default_response(hdr)
+            return
         error = self._learn_transfer.append(
             sequence,
-            int(args.position),
+            position,
             part,
-            int(args.msgpartcrc),
+            checksum,
         )
         if error is not None:
             _LOGGER.warning(
@@ -586,7 +602,7 @@ class ZGIR01Transmit(ZosungIRTransmit):
                 "(sequence=%s, position=%s, bytes=%s)",
                 error,
                 sequence,
-                int(args.position),
+                position,
                 len(part),
             )
             self._send_default_response(hdr, foundation.Status.FAILURE)
@@ -668,6 +684,7 @@ class ZGIR01Transmit(ZosungIRTransmit):
         self._last_learn_completion_sequences = (
             self._learn_transfer.completion_sequences()
         )
+        self._last_completed_learn_parts = self._learn_transfer.parts.copy()
         self._learn_transfer.reset()
         self.create_catching_task(
             self.endpoint.zosung_ircontrol.command(
