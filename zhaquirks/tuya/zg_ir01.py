@@ -830,4 +830,4 @@ for channel in range(1, 7):
             fallback_name=f"Switch {channel} {state} code",
         )
 
-_builder.add_to_registry()
+_builder.skip_configuration().add_to_registry()

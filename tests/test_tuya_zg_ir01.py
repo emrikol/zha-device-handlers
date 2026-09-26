@@ -216,6 +216,7 @@ def test_zg_ir01_matches_capabilities(zigpy_device_from_v2_quirk, raw_transport)
 
     entry = DEVICE_REGISTRY.match_entry(device)
     definition = entry.zha_device_factory.quirk_definition
+    assert definition.skip_configuration is True
     metadata = definition.entity_metadata
     assert len(metadata) == 18
     assert sum(item.entity_platform is EntityPlatform.SWITCH for item in metadata) == 6
