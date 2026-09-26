@@ -920,10 +920,10 @@ async def test_zg_ir01_rejects_invalid_learn_start(zigpy_device_from_v2_quirk):
     assert transmit._learn_transfer.sequence is None
 
 
-async def test_zg_ir01_rejects_unrelated_orphan_learn_terminal(
+async def test_zg_ir01_acknowledges_idle_learn_terminal(
     zigpy_device_from_v2_quirk,
 ):
-    """Only a duplicate of the immediately completed terminal is idempotent."""
+    """A terminal-only stop response is harmless while no transfer is active."""
     device = zigpy_device_from_v2_quirk(
         "HOBEIAN",
         "ZG-IR01",
@@ -939,8 +939,49 @@ async def test_zg_ir01_rejects_unrelated_orphan_learn_terminal(
 
     default_response_mock.assert_called_once_with(
         hdr,
+        status=foundation.Status.SUCCESS,
+    )
+    assert device.last_learned_ir_code == ""
+
+
+async def test_zg_ir01_rejects_mismatched_active_learn_terminal(
+    zigpy_device_from_v2_quirk,
+):
+    """An unrelated terminal cannot finish or discard an active transfer."""
+    device = zigpy_device_from_v2_quirk(
+        "HOBEIAN",
+        "ZG-IR01",
+        cluster_ids=_cluster_ids(raw_transport=True),
+    )
+    transmit = device.endpoints[1].zosung_irtransmit
+    sequence = 0x0117
+    start = (
+        bytes.fromhex("0502100100")
+        + sequence.to_bytes(2, "little")
+        + (4).to_bytes(4, "little")
+        + bytes.fromhex("0000000004e001020000")
+    )
+    terminal = bytes.fromhex("09690518000000")
+
+    with (
+        mock.patch.object(
+            transmit.endpoint, "request", return_value=foundation.Status.SUCCESS
+        ),
+        mock.patch.object(transmit, "send_default_rsp") as default_response_mock,
+    ):
+        hdr, args = transmit.deserialize(start)
+        transmit.handle_message(hdr, args)
+        await wait_for_zigpy_tasks()
+
+        hdr, args = transmit.deserialize(terminal)
+        transmit.handle_message(hdr, args)
+        await wait_for_zigpy_tasks()
+
+    default_response_mock.assert_called_with(
+        hdr,
         status=foundation.Status.FAILURE,
     )
+    assert transmit._learn_transfer.sequence == sequence
     assert device.last_learned_ir_code == ""
 
 

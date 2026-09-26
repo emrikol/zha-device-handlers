@@ -12,8 +12,8 @@ Observed raw-transport behavior on HOBEIAN / ZG-IR01:
   part at the exact end offset instead of reliably sending frame 0x04.
 * Learn transfers require normal ZCL default responses and can truncate the
   16-bit sequence to its low byte in terminal frame 0x05.
-* A successful learn terminal can be retransmitted once and is acknowledged
-  idempotently without publishing the packet twice.
+* Learning can emit terminal-only stop frames while idle and replay the final
+  data part after completion; both are acknowledged without republishing.
 * Learned packets use a model-specific Broadlink dialect: the length field is
   the complete packet length and the timing payload has no terminator or pad.
 * The firmware's Broadlink timer is calibrated at about 32.2 microseconds per
@@ -482,7 +482,6 @@ class ZGIR01Transmit(ZosungIRTransmit):
         super().__init__(*args, **kwargs)
         self._outgoing_parts_in_flight: set[tuple[int, int]] = set()
         self._learn_transfer = _LearnTransfer()
-        self._last_learn_completion_sequences: set[int] = set()
         self._last_completed_learn_parts: dict[tuple[int, int], tuple[bytes, int]] = {}
 
     async def command(self, command_id: Any, *args: Any, **kwargs: Any) -> Any:
@@ -554,7 +553,6 @@ class ZGIR01Transmit(ZosungIRTransmit):
             self._send_default_response(hdr, foundation.Status.FAILURE)
             return
 
-        self._last_learn_completion_sequences.clear()
         self._last_completed_learn_parts.clear()
         self._send_default_response(hdr)
         self.create_catching_task(
@@ -640,10 +638,10 @@ class ZGIR01Transmit(ZosungIRTransmit):
     def _finish_learn_transfer(self, hdr: foundation.ZCLHeader, args: Any) -> None:
         """Publish only a complete packet from the active learn transfer."""
         sequence = int(args.seq)
-        if (
-            self._learn_transfer.sequence is None
-            and sequence in self._last_learn_completion_sequences
-        ):
+        if self._learn_transfer.sequence is None:
+            # Stopping learning while idle can produce a terminal-only frame
+            # with a new sequence. It carries no data and cannot publish a
+            # signal, so acknowledge it idempotently.
             self._send_default_response(hdr)
             return
         packet, error = self._learn_transfer.finish(sequence)
@@ -681,9 +679,6 @@ class ZGIR01Transmit(ZosungIRTransmit):
         self.endpoint.device.last_learned_ir_code = base64.b64encode(
             normalized_packet
         ).decode()
-        self._last_learn_completion_sequences = (
-            self._learn_transfer.completion_sequences()
-        )
         self._last_completed_learn_parts = self._learn_transfer.parts.copy()
         self._learn_transfer.reset()
         self.create_catching_task(
